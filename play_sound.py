@@ -2,16 +2,29 @@ import sounddevice as sd
 import numpy as np
 import io
 import wave
+import logging
+import asyncio # asyncioをインポート
 
 class PlaySound:
     def __init__(self):
         self.devices = sd.query_devices()
-        print("--- デバッグ情報: 利用可能なサウンドデバイス --- ")
+        logging.debug("--- デバッグ情報: 利用可能なサウンドデバイス --- ")
         for i, device in enumerate(self.devices):
-            print(f"  ID: {i}, Name: {device['name']}, Host API: {device['hostapi']}, Max Output Channels: {device['max_output_channels']}")
-        print("--------------------------------------")
+            logging.debug(f"  ID: {i}, Name: {device['name']}, Host API: {device['hostapi']}, Max Output Channels: {device['max_output_channels']}")
+        logging.debug("--------------------------------------")
 
-    def play_audio_data(self, data: np.ndarray, rate: int, output_device_id: int = None):
+    def get_device_id_by_name(self, name: str):
+        """
+        デバイス名からデバイスIDを取得します。
+        """
+        for i, device in enumerate(self.devices):
+            if name.lower() in device['name'].lower():
+                logging.debug(f"--- デバッグ情報: デバイス名 '{name}' に一致するID: {i} を見つけました。 ---")
+                return i
+        logging.warning(f"--- デバッグ情報: デバイス名 '{name}' に一致するデバイスが見つかりませんでした。 ---")
+        return None
+
+    async def play_audio_data(self, data: np.ndarray, rate: int, output_device_id: int = None):
         """
         numpy配列の音声データとサンプリングレートを指定されたサウンドデバイスで再生します。
 
@@ -20,18 +33,20 @@ class PlaySound:
             rate (int): サンプリングレート。
             output_device_id (int, optional): 音声を出力するデバイスのID。Noneの場合、デフォルトの出力デバイスを使用します。
         """
-        print(f"--- デバッグ情報: 音声再生開始 (出力デバイスID: {output_device_id}, サンプリングレート: {rate}) ---")
+        logging.debug(f"--- デバッグ情報: 音声再生開始 (出力デバイスID: {output_device_id}, サンプリングレート: {rate}) ---")
         try:
-            # sounddeviceで再生
-            sd.play(data, samplerate=rate, device=output_device_id)
-            sd.wait() # 再生が完了するまで待機
-            print("--- デバッグ情報: 音声再生完了 ---")
+            # sounddevice.playは同期的なのでasyncio.to_threadでラップ
+            await asyncio.to_thread(sd.play, data, samplerate=rate, device=output_device_id)
+            await asyncio.to_thread(sd.wait) # 再生が完了するまで待機
+            logging.debug("--- デバッグ情報: 音声再生完了 ---")
 
         except Exception as e:
-            print(f"エラー: 音声再生中に問題が発生しました: {e}")
-            print("--- デバッグ情報: 音声再生エラー ---")
+            logging.error(f"エラー: 音声再生中に問題が発生しました: {e}")
+            logging.debug("--- デバッグ情報: 音声再生エラー ---")
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.info("PlaySoundのテストを開始します。")
     # テスト用のダミーWAVデータを作成
     sample_rate = 44100  # サンプルレート
     duration = 1.0       # 1秒
@@ -43,12 +58,21 @@ if __name__ == "__main__":
     audio_data_np = data.astype(np.float32) # sounddeviceはfloat32を推奨
 
     player = PlaySound()
-    print("ダミー音声の再生テストを開始します。")
+    logging.info("ダミー音声の再生テストを開始します。")
     # デフォルトの出力デバイスで再生
-    player.play_audio_data(audio_data_np, sample_rate)
+    async def test_play_audio():
+        await player.play_audio_data(audio_data_np, sample_rate)
 
-    # 特定のデバイスIDを指定して再生する場合
-    # print("特定のデバイスIDで再生テストを開始します。(ID: 0)")
-    # player.play_audio_data(audio_data_np, sample_rate, output_device_id=0)
+        # 特定のデバイスIDを指定して再生する場合
+        # logging.info("特定のデバイスIDで再生テストを開始します。(ID: 0)")
+        # await player.play_audio_data(audio_data_np, sample_rate, output_device_id=0)
 
-    print("ダミー音声の再生テストが完了しました。")
+        # デバイス名でIDを取得するテスト
+        cable_input_id = player.get_device_id_by_name("CABLE Input")
+        if cable_input_id is not None:
+            logging.info(f"CABLE Input のID: {cable_input_id}")
+            # await player.play_audio_data(audio_data_np, sample_rate, output_device_id=cable_input_id)
+
+        logging.info("ダミー音声の再生テストが完了しました。")
+
+    asyncio.run(test_play_audio())

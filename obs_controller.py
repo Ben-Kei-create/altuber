@@ -1,115 +1,240 @@
 import obsws_python as obs
+import logging
+import asyncio
+import random
+from dotenv import load_dotenv
+import os
 
 class OBSController:
-    def __init__(self, host='localhost', port=4444, password=''):
+    def __init__(self, host='localhost', port=4455, password=''):  # デフォルトポートを4455に変更
         self.host = host
         self.port = port
         self.password = password
         self.ws = None
-        print(f"--- デバッグ情報: OBSController インスタンス化 (ホスト: {host}, ポート: {port}) ---")
+        self.connection_attempts = 0
+        logging.info(f"OBSController初期化 (ホスト: {host}, ポート: {port})")
 
-    def connect(self):
+    async def __aenter__(self):
         """
-        OBS WebSocketサーバーに接続します。
+        非同期コンテキストマネージャーの開始時にOBS WebSocketサーバーに接続します。
         """
-        print("--- デバッグ情報: OBSに接続中... ---")
+        logging.info("OBSに接続中...")
+        return await self.connect()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """
+        非同期コンテキストマネージャーの終了時にOBS WebSocketサーバーから切断します。
+        """
+        await self.disconnect()
+
+    async def connect(self):
+        """OBS WebSocketサーバーに接続します。"""
+        self.connection_attempts += 1
+        logging.info(f"OBS接続試行 #{self.connection_attempts}")
+        
         try:
-            self.ws = obs.ReqClient(host=self.host, port=self.port, password=self.password)
-            print("--- デバッグ情報: OBSに接続しました。 ---")
-            return True
-        except Exception as e:
-            print(f"エラー: OBSへの接続に失敗しました: {e}")
-            print("--- デバッグ情報: OBS接続エラー ---")
+            # ReqClientは内部で接続と認証を処理
+            self.ws = obs.ReqClient(
+                host=self.host,
+                port=self.port,
+                password=self.password,
+                subs=0,  # サブスクリプション無効
+                timeout=None
+            )
+            logging.info("OBSに接続しました。")
+            
+            # 接続テスト
+            try:
+                version_info = await asyncio.to_thread(self.ws.get_version)
+                logging.info(f"OBSバージョン情報: {version_info}")
+            except Exception as e:
+                logging.warning(f"バージョン情報の取得に失敗: {e}")
+            
+            return self
+            
+        except ConnectionRefusedError:
+            logging.error("OBS WebSocketサーバーに接続できません。OBSが起動しているか、WebSocketプラグインが有効か確認してください。")
             self.ws = None
-            return False
+            raise
+        except Exception as e:
+            logging.error(f"OBSへの接続に失敗しました: {e}")
+            logging.error(f"接続設定: ホスト={self.host}, ポート={self.port}")
+            self.ws = None
+            raise
 
-    def disconnect(self):
-        """
-        OBS WebSocketサーバーから切断します。
-        """
+    async def disconnect(self):
+        """OBS WebSocketサーバーから切断します。"""
         if self.ws:
-            print("--- デバッグ情報: OBSから切断中... ---")
-            self.ws.close()
-            self.ws = None
-            print("--- デバッグ情報: OBSから切断しました。 ---")
+            try:
+                logging.info("OBSから切断中...")
+                # obsws-pythonのReqClientは自動的にクローズされるため、明示的な処理は不要
+                self.ws = None
+                logging.info("OBSから切断しました。")
+            except Exception as e:
+                logging.warning(f"OBS切断時にエラーが発生しました: {e}")
 
-    def get_current_scene(self):
-        """
-        現在のOBSシーン名を取得します。
-        """
+    async def get_current_scene(self):
+        """現在のOBSシーン名を取得します。"""
         if not self.ws:
-            print("エラー: OBSに接続されていません。")
+            logging.error("OBSに接続されていません。")
             return None
+            
         try:
-            response = self.ws.get_current_program_scene()
-            print(f"--- デバッグ情報: 現在のシーン -> {response.current_program_scene_name} ---")
-            return response.current_program_scene_name
+            response = await asyncio.to_thread(self.ws.get_current_program_scene)
+            scene_name = response.current_program_scene_name
+            logging.debug(f"現在のシーン: {scene_name}")
+            return scene_name
         except Exception as e:
-            print(f"エラー: 現在のシーンの取得に失敗しました: {e}")
+            logging.error(f"現在のシーンの取得に失敗しました: {e}")
             return None
 
-    def set_current_scene(self, scene_name: str):
-        """
-        OBSのシーンを切り替えます。
-        """
+    async def set_current_scene(self, scene_name: str):
+        """OBSのシーンを切り替えます。"""
         if not self.ws:
-            print("エラー: OBSに接続されていません。")
+            logging.error("OBSに接続されていません。")
             return False
+            
         try:
-            self.ws.set_current_program_scene(scene_name)
-            print(f"--- デバッグ情報: シーンを '{scene_name}' に切り替えました。 ---")
+            await asyncio.to_thread(self.ws.set_current_program_scene, scene_name)
+            logging.info(f"シーンを '{scene_name}' に切り替えました。")
             return True
         except Exception as e:
-            print(f"エラー: シーン '{scene_name}' への切り替えに失敗しました: {e}")
+            logging.error(f"シーン '{scene_name}' への切り替えに失敗しました: {e}")
             return False
 
-    def set_source_visibility(self, scene_name: str, source_name: str, visible: bool):
-        """
-        指定されたシーン内のソースの表示/非表示を切り替えます。
-        """
+    async def set_source_visibility(self, scene_name: str, source_name: str, visible: bool):
+        """指定されたシーン内のソースの表示/非表示を切り替えます。"""
         if not self.ws:
-            print("エラー: OBSに接続されていません。")
+            logging.error("OBSに接続されていません。")
             return False
+            
         try:
-            self.ws.set_scene_item_enabled(scene_name, source_name, visible)
-            print(f"--- デバッグ情報: シーン '{scene_name}' のソース '{source_name}' を {'表示' if visible else '非表示'} に設定しました。 ---")
+            await asyncio.to_thread(self.ws.set_scene_item_enabled, scene_name, source_name, visible)
+            status = '表示' if visible else '非表示'
+            logging.info(f"シーン '{scene_name}' のソース '{source_name}' を {status} に設定しました。")
             return True
         except Exception as e:
-            print(f"エラー: ソース '{source_name}' の表示/非表示設定に失敗しました: {e}")
+            logging.error(f"ソース '{source_name}' の表示/非表示設定に失敗しました: {e}")
             return False
+
+    async def set_text_source_text(self, source_name: str, text: str):
+        """指定されたテキストソースのテキストを設定します。"""
+        if not self.ws:
+            logging.error("OBSに接続されていません。")
+            return False
+            
+        try:
+            # テキストの長さ制限（OBSの制限を考慮）
+            if len(text) > 1000:
+                text = text[:997] + "..."
+                logging.warning("テキストが長すぎるため、1000文字に切り詰めました。")
+            
+            # 入力設定を更新
+            settings = {"text": text}
+            await asyncio.to_thread(self.ws.set_input_settings, source_name, settings, True)
+            
+            logging.info(f"テキストソース '{source_name}' を更新しました。")
+            logging.debug(f"設定内容: {text[:100]}{'...' if len(text) > 100 else ''}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"テキストソース '{source_name}' への設定に失敗しました: {e}")
+            logging.error(f"ソース名が正しいか、テキストソースとして設定されているか確認してください。")
+            
+            # より詳細なエラー情報を提供
+            try:
+                # ソース一覧を取得してデバッグ情報を提供
+                inputs = await asyncio.to_thread(self.ws.get_input_list)
+                logging.debug("利用可能な入力ソース一覧:")
+                for input_item in inputs.inputs:
+                    logging.debug(f"  - {input_item['inputName']} ({input_item['inputKind']})")
+            except Exception as debug_e:
+                logging.debug(f"ソース一覧の取得に失敗: {debug_e}")
+                
+            return False
+
+    async def get_scene_list(self):
+        """OBSのシーン一覧を取得します。"""
+        if not self.ws:
+            logging.error("OBSに接続されていません。")
+            return None
+            
+        try:
+            response = await asyncio.to_thread(self.ws.get_scene_list)
+            scenes = [scene['sceneName'] for scene in response.scenes]
+            logging.debug(f"利用可能なシーン: {scenes}")
+            return scenes
+        except Exception as e:
+            logging.error(f"シーン一覧の取得に失敗しました: {e}")
+            return None
+
+    async def get_input_list(self):
+        """OBSの入力ソース一覧を取得します。"""
+        if not self.ws:
+            logging.error("OBSに接続されていません。")
+            return None
+            
+        try:
+            response = await asyncio.to_thread(self.ws.get_input_list)
+            inputs = [(item['inputName'], item['inputKind']) for item in response.inputs]
+            logging.debug(f"利用可能な入力ソース数: {len(inputs)}")
+            return inputs
+        except Exception as e:
+            logging.error(f"入力ソース一覧の取得に失敗しました: {e}")
+            return None
 
 if __name__ == "__main__":
-    print("OBSControllerのテストを開始します。")
-    # OBSのWebSocket設定に合わせてホスト、ポート、パスワードを設定してください
-    # パスワードを設定していない場合は空文字列のまま
-    obs_host = 'localhost'
-    obs_port = 4444
-    obs_password = 'YOUR_OBS_WEBSOCKET_PASSWORD' # OBSで設定したパスワード
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.info("OBSControllerのテストを開始します。")
 
-    controller = OBSController(obs_host, obs_port, obs_password)
+    # .envファイルから環境変数を読み込む
+    load_dotenv()
 
-    if controller.connect():
-        # 現在のシーン名を取得
-        current_scene = controller.get_current_scene()
-        if current_scene:
-            print(f"現在のシーン: {current_scene}")
+    obs_host = os.getenv("OBS_HOST", 'localhost')
+    obs_port = int(os.getenv("OBS_PORT", 4455))
+    obs_password = os.getenv("OBS_PASSWORD", '')
 
-            # シーンを切り替えるテスト (存在しないシーン名だとエラーになります)
-            # test_scene_name = "新しいシーン名"
-            # if controller.set_current_scene(test_scene_name):
-            #     print(f"シーンが {test_scene_name} に切り替わりました。")
-            # else:
-            #     print(f"シーン {test_scene_name} への切り替えに失敗しました。")
+    async def test_obs_controller():
+        try:
+            async with OBSController(obs_host, obs_port, obs_password) as controller:
+                logging.info("=== OBS接続テスト開始 ===")
+                
+                # シーン情報の取得
+                current_scene = await controller.get_current_scene()
+                if current_scene:
+                    logging.info(f"現在のシーン: {current_scene}")
+                
+                # シーン一覧の取得
+                scenes = await controller.get_scene_list()
+                if scenes:
+                    logging.info(f"利用可能なシーン数: {len(scenes)}")
+                
+                # 入力ソース一覧の取得
+                inputs = await controller.get_input_list()
+                if inputs:
+                    logging.info(f"利用可能な入力ソース数: {len(inputs)}")
+                    logging.info("テキストソースを探しています...")
+                    text_sources = [name for name, kind in inputs if 'text' in kind.lower()]
+                    logging.info(f"テキストソース: {text_sources}")
+                
+                # テキストソーステスト
+                test_sources = ["Answer", "Question"]  # テスト対象のソース名
+                
+                for source_name in test_sources:
+                    logging.info(f"=== {source_name} ソーステスト ===")
+                    test_text = f"テスト中... ({source_name}) - {random.randint(1, 100)}"
+                    
+                    success = await controller.set_text_source_text(source_name, test_text)
+                    if success:
+                        logging.info(f"✓ {source_name} の設定に成功しました。")
+                    else:
+                        logging.error(f"✗ {source_name} の設定に失敗しました。")
+                    
+                    await asyncio.sleep(2)  # 2秒待機
+                
+                logging.info("=== OBS接続テスト完了 ===")
+                
+        except Exception as e:
+            logging.error(f"OBSControllerのテスト中にエラーが発生しました: {e}")
 
-            # ソースの表示/非表示を切り替えるテスト (存在しないソース名だとエラーになります)
-            # test_source_name = "テキスト"
-            # if controller.set_source_visibility(current_scene, test_source_name, False):
-            #     print(f"ソース '{test_source_name}' を非表示にしました。")
-            # else:
-            #     print(f"ソース '{test_source_name}' の非表示設定に失敗しました。")
-
-        controller.disconnect()
-    else:
-        print("OBSへの接続に失敗したため、テストをスキップします。")
-
-    print("OBSControllerのテストが完了しました。")
+    asyncio.run(test_obs_controller())
